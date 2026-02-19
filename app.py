@@ -1,46 +1,92 @@
-from flask import Flask, request, jsonify
+from flask import Flask, render_template, request, redirect, session, jsonify
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import os
 
 app = Flask(__name__)
+app.secret_key = "super_secret_key_2026"
 
-# Home Route (Important - warna Not Found aata hai)
-@app.route("/")
-def home():
-    return "Inbox Mailer Running Successfully ✅"
+# Fixed Login Credentials
+LOGIN_ID = "2026"
+LOGIN_PASS = "2026"
 
-# Send Mail Route
+
+# ======================
+# LOGIN PAGE
+# ======================
+@app.route("/", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+
+        if username == LOGIN_ID and password == LOGIN_PASS:
+            session["logged_in"] = True
+            return redirect("/launcher")
+        else:
+            return render_template("login.html", error="Invalid Credentials")
+
+    return render_template("login.html")
+
+
+# ======================
+# LAUNCHER PAGE
+# ======================
+@app.route("/launcher")
+def launcher():
+    if not session.get("logged_in"):
+        return redirect("/")
+    return render_template("launcher.html")
+
+
+# ======================
+# SEND MAIL API
+# ======================
 @app.route("/send", methods=["POST"])
 def send_mail():
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.json
+
+    sender_name = data.get("senderName")
+    email = data.get("email")
+    password = data.get("password")
+    subject = data.get("subject")
+    message_body = data.get("message")
+    recipients = data.get("recipients")
+
+    if not all([sender_name, email, password, subject, message_body, recipients]):
+        return jsonify({"error": "All fields required"})
+
     try:
-        data = request.json
-
-        sender_email = os.environ.get("EMAIL")
-        sender_password = os.environ.get("PASSWORD")
-
-        receiver_email = data.get("to")
-        subject = data.get("subject")
-        body = data.get("message")
-
-        msg = MIMEMultipart()
-        msg["From"] = sender_email
-        msg["To"] = receiver_email
-        msg["Subject"] = subject
-
-        msg.attach(MIMEText(body, "plain"))
-
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
-        server.login(sender_email, sender_password)
-        server.sendmail(sender_email, receiver_email, msg.as_string())
-        server.quit()
+        server.login(email, password)
 
-        return jsonify({"status": "Email Sent Successfully ✅"})
+        for recipient in recipients:
+            msg = MIMEMultipart()
+            msg["From"] = f"{sender_name} <{email}>"
+            msg["To"] = recipient
+            msg["Subject"] = subject
+            msg.attach(MIMEText(message_body, "plain"))
+            server.sendmail(email, recipient, msg.as_string())
+
+        server.quit()
+        return jsonify({"status": "Emails Sent Successfully"})
 
     except Exception as e:
         return jsonify({"error": str(e)})
 
+
+# ======================
+# LOGOUT
+# ======================
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=False)
