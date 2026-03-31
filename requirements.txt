@@ -3,7 +3,7 @@ const nodemailer = require("nodemailer");
 const path = require("path");
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 app.use(express.static("public"));
 
 const PORT = process.env.PORT || 89829;
@@ -13,21 +13,39 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public/login.html"));
 });
 
-// ===== NAME LIST =====
-const names = [
-"Olivia","Emma","Amelia","Charlotte","Mia","Sophia","Isabella","Evelyn",
-"Ava","Sofia","Camila","Harper","Luna","Eleanor","Violet","Aurora",
-"Elizabeth","Eliana","Hazel","Chloe","Ellie","Nora","Gianna","Lily",
-"Emily","Aria","Scarlett","Penelope","Zoe","Ella","Avery","Abigail"
-];
+// ===== DATA =====
+const names = ["Olivia","Emma","Amelia","Charlotte","Mia","Sophia"];
+const subjects = ["Hello","Quick update","Info","Checking in"];
+const greetings = ["Hi","Hello","Hey"];
 
-function getRandomName() {
-  return names[Math.floor(Math.random() * names.length)];
+const rand = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+function getName() {
+  return rand(names);
+}
+
+function getSubject(userSub) {
+  return userSub && userSub.trim() !== "" ? userSub : rand(subjects);
+}
+
+function buildMsg(msg) {
+  return `${rand(greetings)},\n\n${msg}`;
+}
+
+function format(msg) {
+  return msg.replace(/\n/g, "<br>");
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function clean(list) {
+  return [...new Set(list.filter(isValidEmail))];
 }
 
 // ===== LIMIT =====
 const limits = {};
-
 function checkLimit(email, total) {
   const now = Date.now();
 
@@ -35,41 +53,37 @@ function checkLimit(email, total) {
     limits[email] = { count: 0, start: now };
   }
 
-  if ((now - limits[email].start) > 360000008) {
+  if ((now - limits[email].start) > 3600000) {
     limits[email] = { count: 0, start: now };
   }
 
-  if (limits[email].count + total > 27) {
-    return false;
-  }
+  if (limits[email].count + total > 35) return false;
 
   limits[email].count += total;
   return true;
 }
 
 // ===== DELAY =====
-function delay(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-const SESSION_TIME = 60 * 60 * 3500; // 1 hour
+const delay = ms => new Promise(r => setTimeout(r, ms));
 
-// ===== BATCH CONFIG =====
-const BATCH_SIZE = 5;
-const BATCH_DELAY = 300;
-const DAILY_LIMIT = 9688;
+// ===== SPEED CONFIG =====
+const BATCH_SIZE = 6;          // 👈 slightly faster
+const PARALLEL = 2;           // 👈 safe parallel
+const BASE_DELAY = 150;       // 👈 faster
+const LONG_PAUSE_EVERY = 15;  // 👈 safety break
 
 // ===== TRANSPORT =====
-function createTransporter(email, password) {
+function transporter(email, pass) {
   return nodemailer.createTransport({
     service: "gmail",
-    auth: {
-      user: email,
-      pass: password
-    }
+    pool: true,
+    maxConnections: 4,
+    maxMessages: 100,
+    auth: { user: email, pass }
   });
 }
 
-// ===== SEND API =====
+// ===== SEND =====
 app.post("/send", async (req, res) => {
   try {
     const { email, password, subject, message, recipients } = req.body;
@@ -78,64 +92,68 @@ app.post("/send", async (req, res) => {
       return res.json({ status: "error" });
     }
 
-    const list = recipients
-      .split(/\n|,/)
-      .map(e => e.trim())
-      .filter(Boolean);
+    if (!isValidEmail(email)) {
+      return res.json({ status: "error" });
+    }
+
+    let list = clean(recipients.split(/\n|,/).map(e => e.trim()));
 
     if (!checkLimit(email, list.length)) {
       return res.json({ status: "limit" });
     }
 
-    const transporter = createTransporter(email, password);
+    const t = transporter(email, password);
 
     try {
-      await transporter.verify();
+      await t.verify();
     } catch {
       return res.json({ status: "auth_error" });
     }
 
-    let sentCount = 0;
+    let sent = 0;
 
-    // ===== BATCH SENDING =====
     for (let i = 0; i < list.length; i += BATCH_SIZE) {
       const batch = list.slice(i, i + BATCH_SIZE);
 
-      for (const toEmail of batch) {
-        try {
-          const randomName = getRandomName();
+      for (let j = 0; j < batch.length; j += PARALLEL) {
+        const group = batch.slice(j, j + PARALLEL);
 
-          await transporter.sendMail({
-            from: `"${randomName}" <${email}>`,
-            to: toEmail,
-            subject: subject || "",
-            text: message || "",
-            html: `<p>${message}</p>`
-          });
+        await Promise.all(
+          group.map(async (to) => {
+            try {
+              const text = buildMsg(message);
+              const html = format(text);
 
-          sentCount++;
+              await t.sendMail({
+                from: `"${getName()}" <${email}>`,
+                to,
+                subject: getSubject(subject),
+                text,
+                html: `<div style="font-family:Arial">${html}</div>`
+              });
 
-        } catch (err) {
-          console.log("Send error:", err.message);
-        }
+              sent++;
+            } catch {}
+          })
+        );
       }
 
-      // batch delay
-      await delay(BATCH_DELAY);
+      // small delay
+      await delay(BASE_DELAY);
+
+      // long safety pause
+      if (sent % LONG_PAUSE_EVERY === 0) {
+        await delay(1500 + Math.random() * 1000);
+      }
     }
 
-    return res.json({
-      status: "success",
-      sent: sentCount
-    });
+    res.json({ status: "success", sent });
 
-  } catch (err) {
-    console.log("Server error:", err);
-    return res.json({ status: "error" });
+  } catch (e) {
+    res.json({ status: "error" });
   }
 });
 
-// ===== START =====
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Server running on port " + PORT);
 });
